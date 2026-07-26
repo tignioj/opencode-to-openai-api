@@ -1,0 +1,16 @@
+{
+  "name": "opencode-to-openai-api",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "An OpenAI-compatible Chat Completions gateway for OpenCode",
+  "scripts": {
+    "start": "node src/server.js",
+    "dev": "node --watch src/server.js",
+    "test": "node --test",
+    "check": "node --check src/server.js && node --check src/opencode-client.js && node --check src/openai.js"
+  },
+  "engines": {
+    "node": ">=20.11"
+  }
+}
