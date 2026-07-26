@@ -14,7 +14,9 @@ import {
   openaiToolCall,
   parseChatRequest,
   parseModelName,
+  parsePromptToolBridge,
   permissionsFor,
+  toolBridgeMode,
   usage,
 } from "./openai.js"
 
@@ -107,6 +109,7 @@ async function chat(req, res) {
 async function streamChat(req, res, request, sessionID, prompt, controller) {
   const identity = completionIdentity(request.model)
   const events = await client.events(controller.signal)
+  const promptBridge = toolBridgeMode(request) === "prompt"
   res.writeHead(200, {
     "content-type": "text/event-stream; charset=utf-8",
     "cache-control": "no-cache, no-transform",
@@ -119,6 +122,7 @@ async function streamChat(req, res, request, sessionID, prompt, controller) {
   let assistantInfo = {}
   let sentStructured = false
   let finished = false
+  let promptBridgeText = ""
   const partTypes = new Map()
   const pendingDeltas = new Map()
 
@@ -153,7 +157,8 @@ async function streamChat(req, res, request, sessionID, prompt, controller) {
           partTypes.set(part.id, part.type)
           const pending = pendingDeltas.get(part.id)
           if (pending) {
-            await writeDelta(res, identity, part.type, pending)
+            if (promptBridge && part.type === "text") promptBridgeText += pending
+            else await writeDelta(res, identity, part.type, pending)
             pendingDeltas.delete(part.id)
           }
         }
@@ -163,7 +168,10 @@ async function streamChat(req, res, request, sessionID, prompt, controller) {
       if (event.type === "message.part.delta" && event.properties.field === "text") {
         if (assistantID && event.properties.messageID !== assistantID) continue
         const type = partTypes.get(event.properties.partID)
-        if (type) await writeDelta(res, identity, type, event.properties.delta)
+        if (type) {
+          if (promptBridge && type === "text") promptBridgeText += event.properties.delta
+          else await writeDelta(res, identity, type, event.properties.delta)
+        }
         else {
           pendingDeltas.set(
             event.properties.partID,
@@ -174,14 +182,27 @@ async function streamChat(req, res, request, sessionID, prompt, controller) {
       }
 
       if (event.type === "session.idle") {
+        let final
         if (assistantID) {
-          const final = await client.getMessage(sessionID, assistantID, controller.signal).catch(() => undefined)
+          final = await client.getMessage(sessionID, assistantID, controller.signal).catch(() => undefined)
           if (final?.info) assistantInfo = final.info
           if (!sentStructured && assistantInfo.structured !== undefined) {
             sentStructured = await writeStructured(res, identity, assistantInfo.structured)
           }
         }
-        const structured = normalizeStructured(assistantInfo.structured)
+        let structured = normalizeStructured(assistantInfo.structured)
+        if (promptBridge) {
+          const finalText = (final?.parts ?? [])
+            .filter((part) => part.type === "text" && !part.synthetic && typeof part.text === "string")
+            .map((part) => part.text)
+            .join("")
+          if (finalText) promptBridgeText = finalText
+          structured = parsePromptToolBridge(promptBridgeText, request)
+          if (structured) sentStructured = await writeStructured(res, identity, structured)
+          else if (promptBridgeText) {
+            await writeSse(res, chunkBody({ ...identity, delta: { content: promptBridgeText } }))
+          }
+        }
         await writeSse(
           res,
           chunkBody({

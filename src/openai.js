@@ -142,18 +142,20 @@ export function buildPrompt(request) {
         JSON.stringify(conversational),
       ].join("\n\n")
 
-  const bridge = request.tools.length > 0 && request.tool_choice !== "none"
+  const bridge = toolBridgeMode(request)
   const system = [
     ...systemMessages,
     "Act as the language model requested by the caller. Return only the assistant response; do not discuss this gateway.",
-    bridge
+    bridge === "structured"
       ? [
           "External function tools are described by the required structured-output schema.",
           "You cannot execute those functions yourself. When a function is needed, return action=tool_calls with its exact name and JSON arguments.",
           "When no function is needed, return action=message with the final response in content.",
           "Never substitute an OpenCode built-in tool for an external function.",
         ].join(" ")
-      : undefined,
+      : bridge === "prompt"
+        ? promptToolBridgeInstructions(request)
+        : undefined,
   ]
     .filter(Boolean)
     .join("\n\n")
@@ -161,8 +163,39 @@ export function buildPrompt(request) {
   return {
     system,
     parts: [{ type: "text", text: text || "Continue." }],
-    format: bridge ? { type: "json_schema", schema: toolBridgeSchema(request) } : undefined,
+    format: bridge === "structured" ? { type: "json_schema", schema: toolBridgeSchema(request) } : undefined,
   }
+}
+
+export function toolBridgeMode(request) {
+  if (!request?.tools?.length || request.tool_choice === "none") return "none"
+  const model = typeof request.model === "string" ? request.model.toLowerCase() : ""
+  return /^opencode\/deepseek(?:[-/]|$)/.test(model) ? "prompt" : "structured"
+}
+
+function promptToolBridgeInstructions(request) {
+  const tools = selectedTools(request).map((tool) => ({
+    name: tool.name,
+    description: tool.description,
+    parameters: stripSchemaMeta(tool.parameters),
+  }))
+  const forced = request.tool_choice === "required" || typeof request.tool_choice === "object"
+  const responseForms = forced
+    ? ['{"action":"tool_calls","tool_calls":[{"name":"tool_name","arguments":{}}]}']
+    : [
+        '{"action":"message","content":"final assistant response"}',
+        '{"action":"tool_calls","tool_calls":[{"name":"tool_name","arguments":{}}]}',
+      ]
+
+  return [
+    "External function tools are available, but you cannot execute them yourself.",
+    "Return exactly one JSON object with no Markdown fence and no text before or after it.",
+    `Use one of these response forms: ${responseForms.join(" or ")}`,
+    "Use action=tool_calls only when a function is needed. Use the exact function name and put its arguments in a JSON object.",
+    forced ? "You must request at least one tool call." : "When no function is needed, use action=message.",
+    "Never substitute an OpenCode built-in tool for an external function.",
+    `Available external tools: ${JSON.stringify(tools)}`,
+  ].join("\n")
 }
 
 function contentText(content) {
@@ -239,7 +272,7 @@ function stripSchemaMeta(value) {
 export function permissionsFor(request) {
   const rules = [{ permission: "*", pattern: "*", action: "deny" }]
   if (request.webFetch) rules.push({ permission: "webfetch", pattern: "*", action: "allow" })
-  if (request.tools.length > 0 && request.tool_choice !== "none") {
+  if (toolBridgeMode(request) === "structured") {
     rules.push({ permission: "StructuredOutput", pattern: "*", action: "allow" })
   }
   return rules
@@ -261,7 +294,9 @@ export function normalizeResult(result, request) {
     .map((part) => part.text)
     .join("")
 
-  const bridged = normalizeStructured(info.structured)
+  const bridged =
+    normalizeStructured(info.structured) ??
+    (toolBridgeMode(request) === "prompt" ? parsePromptToolBridge(text, request) : undefined)
   if (bridged?.action === "tool_calls" && bridged.tool_calls.length > 0) {
     return {
       content: null,
@@ -292,6 +327,77 @@ export function normalizeStructured(value) {
     return { action: "message", content: typeof value.content === "string" ? value.content : "" }
   }
   return undefined
+}
+
+export function parsePromptToolBridge(text, request) {
+  if (typeof text !== "string" || !text.trim()) return undefined
+  const allowedTools = new Set(selectedTools(request).map((tool) => tool.name))
+  for (const candidate of jsonObjectCandidates(text)) {
+    let value
+    try {
+      value = JSON.parse(candidate)
+    } catch {
+      continue
+    }
+    const structured = normalizeStructured(value)
+    if (!structured) continue
+    if (structured.action === "message") return structured
+
+    const toolCalls = structured.tool_calls
+      .filter((call) => allowedTools.has(call.name))
+      .map((call) => ({ ...call, arguments: normalizeToolArguments(call.arguments) }))
+    if (toolCalls.length > 0) return { action: "tool_calls", tool_calls: toolCalls }
+  }
+  return undefined
+}
+
+function jsonObjectCandidates(text) {
+  const candidates = [text.trim()]
+  for (const match of text.matchAll(/```(?:json)?\s*([\s\S]*?)```/gi)) {
+    candidates.push(match[1].trim())
+  }
+
+  let start = -1
+  let depth = 0
+  let quoted = false
+  let escaped = false
+  for (let index = 0; index < text.length; index += 1) {
+    const character = text[index]
+    if (quoted) {
+      if (escaped) escaped = false
+      else if (character === "\\") escaped = true
+      else if (character === '"') quoted = false
+      continue
+    }
+    if (character === '"') {
+      quoted = true
+      continue
+    }
+    if (character === "{") {
+      if (depth === 0) start = index
+      depth += 1
+    } else if (character === "}" && depth > 0) {
+      depth -= 1
+      if (depth === 0 && start >= 0) {
+        candidates.push(text.slice(start, index + 1))
+        start = -1
+      }
+    }
+  }
+  return [...new Set(candidates)]
+}
+
+function normalizeToolArguments(value) {
+  if (value && typeof value === "object" && !Array.isArray(value)) return value
+  if (typeof value === "string") {
+    try {
+      const parsed = JSON.parse(value)
+      if (parsed && typeof parsed === "object" && !Array.isArray(parsed)) return parsed
+    } catch {
+      // Invalid string arguments fall back to an empty object.
+    }
+  }
+  return {}
 }
 
 export function openaiToolCall(call) {

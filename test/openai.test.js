@@ -6,7 +6,9 @@ import {
   normalizeResult,
   parseChatRequest,
   parseModelName,
+  parsePromptToolBridge,
   permissionsFor,
+  toolBridgeMode,
 } from "../src/openai.js"
 
 test("parses provider/model using only the first slash", () => {
@@ -80,6 +82,116 @@ test("external tools use StructuredOutput and do not enable same-named built-ins
   const prompt = buildPrompt(request)
   assert.equal(prompt.format.type, "json_schema")
   assert.match(JSON.stringify(prompt.format.schema), /web_fetch/)
+})
+
+test("OpenCode DeepSeek tools use prompt bridging without StructuredOutput", () => {
+  const request = parseChatRequest({
+    model: "opencode/deepseek-v4-flash-free",
+    messages: [{ role: "user", content: "fetch" }],
+    tools: [
+      {
+        type: "function",
+        function: {
+          name: "web_fetch",
+          parameters: {
+            type: "object",
+            properties: { url: { type: "string" } },
+            required: ["url"],
+          },
+        },
+      },
+    ],
+  })
+  assert.equal(toolBridgeMode(request), "prompt")
+  assert.equal(permissionsFor(request).some((rule) => rule.permission === "StructuredOutput"), false)
+  const prompt = buildPrompt(request)
+  assert.equal(prompt.format, undefined)
+  assert.match(prompt.system, /Available external tools/)
+  assert.match(prompt.system, /web_fetch/)
+})
+
+test("parses prompt-bridged DeepSeek tool calls and fenced JSON", () => {
+  const request = parseChatRequest({
+    model: "opencode/deepseek-v4-flash-free",
+    messages: [{ role: "user", content: "weather" }],
+    tools: [
+      {
+        type: "function",
+        function: {
+          name: "weather",
+          parameters: { type: "object", properties: { city: { type: "string" } } },
+        },
+      },
+    ],
+  })
+  assert.deepEqual(
+    parsePromptToolBridge(
+      '```json\n{"action":"tool_calls","tool_calls":[{"name":"weather","arguments":"{\\"city\\":\\"Shanghai\\"}"}]}\n```',
+      request,
+    ),
+    {
+      action: "tool_calls",
+      tool_calls: [{ name: "weather", arguments: { city: "Shanghai" } }],
+    },
+  )
+  assert.equal(
+    parsePromptToolBridge(
+      '{"action":"tool_calls","tool_calls":[{"name":"unknown","arguments":{}}]}',
+      request,
+    ),
+    undefined,
+  )
+})
+
+test("normalizes prompt-bridged DeepSeek messages", () => {
+  const request = parseChatRequest({
+    model: "opencode/deepseek-v4-flash-free",
+    messages: [{ role: "user", content: "hello" }],
+    tools: [
+      {
+        type: "function",
+        function: { name: "noop", parameters: { type: "object", properties: {} } },
+      },
+    ],
+  })
+  const result = normalizeResult(
+    {
+      info: { finish: "stop" },
+      parts: [{ type: "text", text: '{"action":"message","content":"hello"}' }],
+    },
+    request,
+  )
+  assert.equal(result.content, "hello")
+  assert.equal(result.finishReason, "stop")
+})
+
+test("normalizes prompt-bridged DeepSeek tool calls", () => {
+  const request = parseChatRequest({
+    model: "opencode/deepseek-v4-flash-free",
+    messages: [{ role: "user", content: "weather" }],
+    tools: [
+      {
+        type: "function",
+        function: { name: "weather", parameters: { type: "object", properties: {} } },
+      },
+    ],
+  })
+  const result = normalizeResult(
+    {
+      info: { finish: "stop" },
+      parts: [
+        {
+          type: "text",
+          text: '{"action":"tool_calls","tool_calls":[{"name":"weather","arguments":{"city":"Shanghai"}}]}',
+        },
+      ],
+    },
+    request,
+  )
+  assert.equal(result.content, null)
+  assert.equal(result.finishReason, "tool_calls")
+  assert.equal(result.toolCalls[0].function.name, "weather")
+  assert.equal(result.toolCalls[0].function.arguments, '{"city":"Shanghai"}')
 })
 
 test("normalizes structured tool calls to OpenAI format", () => {
