@@ -1,6 +1,6 @@
 FROM node:24-alpine
 
-ARG OPENCODE_VERSION=1.18.5
+ARG OPENCODE_VERSION=1.18.29
 RUN apk add --no-cache libgcc libstdc++ ripgrep \
     && npm install --global "opencode-ai@${OPENCODE_VERSION}" \
     && opencode --version

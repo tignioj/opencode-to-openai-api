@@ -3,7 +3,7 @@ services:
     build:
       context: .
       args:
-        OPENCODE_VERSION: "1.18.5"
+        OPENCODE_VERSION: "${OPENCODE_VERSION:-1.18.29}"
     ports:
       - "10000:10000"
     environment:

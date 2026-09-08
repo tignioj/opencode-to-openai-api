@@ -54,6 +54,16 @@ Compose 会在同一个容器中自动启动 OpenCode 后端和兼容层。OpenC
 API_KEY=YOUR_API_KEY OPENCODE_WORKSPACE=/path/to/workspace docker compose up -d --build
 ```
 
+镜像中安装的 OpenCode 版本可通过 `.env` 配置；修改后需要重新构建镜像：
+
+```dotenv
+OPENCODE_VERSION=1.18.29
+```
+
+```bash
+docker compose up -d --build
+```
+
 需要登录其他 provider 时，可在容器中执行：
 
 ```bash
@@ -174,6 +184,7 @@ DeepSeek 工具调用示例：
 |---|---:|---|
 | `API_KEY` | 空 | 外部 Bearer Key；空值表示不鉴权 |
 | `HOST` / `PORT` | `0.0.0.0` / `10000` | 兼容层监听地址 |
+| `OPENCODE_VERSION` | `1.18.5` | Docker 镜像中安装的 OpenCode 版本（仅构建时生效） |
 | `OPENCODE_BASE_URL` | `http://127.0.0.1:4096` | OpenCode 服务地址 |
 | `OPENCODE_DIRECTORY` | 当前目录 | 传给 OpenCode 的工作目录 |
 | `OPENCODE_SERVER_USERNAME` | `opencode` | OpenCode Basic Auth 用户名 |
